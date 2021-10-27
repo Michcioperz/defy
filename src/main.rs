@@ -1,17 +1,14 @@
-use std::{collections::VecDeque, convert::TryInto};
+use std::{collections::VecDeque, convert::TryInto, iter::FromIterator, str::FromStr};
 
-use aspotify::{Client, ClientCredentials, PlaylistItem, PlaylistItemType, Scope, Track};
-use axum::{
-    body::{Bytes, Empty},
-    extract::{Query, TypedHeader},
-    handler::get,
-    response::{IntoResponse, Redirect},
-    Router,
-};
+use axum::{Router, body::{Bytes, Empty}, extract::{Query, TypedHeader}, handler::{Handler, get}, response::{IntoResponse, Redirect}};
 use cookie::Cookie;
+use futures_util::StreamExt;
 use http::Response;
-use lazy_static::lazy_static;
-use url::Url;
+use rspotify::{
+    clients::{BaseClient, OAuthClient},
+    model::{FullTrack, PlayableId, PlayableItem, PlaylistId, PlaylistItem, TrackId},
+    AuthCodeSpotify, ClientResult, Token,
+};
 
 #[tokio::main]
 async fn main() {
@@ -21,36 +18,33 @@ async fn main() {
         .route("/api/callback", get(auth_callback))
         .route("/api/log_in", get(log_in));
     axum::Server::bind(&"127.0.0.1:3000".parse().expect("cannot parse bind address"))
-        .serve(app.into_make_service())
+        // .serve(app.into_make_service())
         .await
         .expect("failure while serving")
 }
 
-fn scopes() -> Vec<Scope> {
-    lazy_static! {
-        static ref SCOPES: Vec<Scope> = vec![
-            Scope::UserLibraryRead,
-            Scope::PlaylistReadPrivate,
-            Scope::PlaylistModifyPrivate,
-            Scope::PlaylistModifyPublic,
-        ];
-    }
-    SCOPES.clone()
+fn base_client() -> rspotify::AuthCodeSpotify {
+    const REDIRECT_URL: &str = "http://localhost:3000/api/callback";
+    rspotify::AuthCodeSpotify::new(
+        rspotify::Credentials::from_env().expect("missing credentials in env"),
+        rspotify::OAuth {
+            redirect_uri: REDIRECT_URL.to_string(),
+            scopes: rspotify::scopes!(
+                "user-library-read",
+                "playlist-read-private",
+                "playlist-modify-private",
+                "playlist-modify-public"
+            ),
+            ..Default::default()
+        },
+    )
 }
-
-fn credentials<'a>() -> &'a ClientCredentials {
-    lazy_static! {
-        static ref CREDS: ClientCredentials =
-            ClientCredentials::from_env().expect("missing or invalid credentials in env");
-    }
-    &CREDS
-}
-
-const REDIRECT_URL: &str = "http://localhost:3000/api/callback";
 
 async fn log_in() -> Redirect {
-    let (url, _state) =
-        aspotify::authorization_url(&credentials().id, scopes(), false, REDIRECT_URL);
+    let client = base_client();
+    let url = client
+        .get_authorize_url(false)
+        .expect("failed to build authorization url");
     Redirect::to(url.try_into().expect("failed to build authorization url"))
 }
 
@@ -60,76 +54,43 @@ struct AuthCallbackQuery {
     state: String,
 }
 
+const COOKIE_NAME: &str = "defy_token";
+
 async fn auth_callback(
     Query(AuthCallbackQuery { code, state }): Query<AuthCallbackQuery>,
 ) -> Result<Response<Empty<Bytes>>, String> {
-    let location = Url::parse_with_params(REDIRECT_URL, [("code", &code), ("state", &state)])
-        .expect("failed to reconstruct callback location");
-    let client = Client::new(credentials().clone());
+    let mut client = base_client();
+    client.oauth.state = state;
     client
-        .redirected(location.as_str(), &state)
+        .request_token(&code)
         .await
         .map_err(|e| e.to_string())?;
     let mut response = Redirect::to("/".try_into().unwrap()).into_response();
     let cookies = response.headers_mut();
     cookies.insert(
         http::header::SET_COOKIE,
-        Cookie::build("refresh_token", client.refresh_token().await.unwrap())
-            .permanent()
-            .http_only(true)
-            .finish()
-            .to_string()
-            .try_into()
-            .expect("failed to build refresh token cookie"),
+        Cookie::build(
+            COOKIE_NAME,
+            serde_json::to_string_pretty(&client.token.lock().await.unwrap().clone().unwrap())
+                .unwrap(),
+        )
+        .permanent()
+        .http_only(true)
+        .finish()
+        .to_string()
+        .try_into()
+        .expect("failed to build refresh token cookie"),
     );
     Ok(response)
 }
 
-async fn fetch_playlist(client: &Client, id: &str) -> anyhow::Result<Vec<PlaylistItem>> {
-    let mut acc = vec![];
-    for i in 0.. {
-        let page = client
-            .playlists()
-            .get_playlists_items(id, 100, i * 100, None)
-            .await?
-            .data;
-        acc.extend(page.items);
-        if acc.len() >= page.total {
-            break;
-        }
-    }
-    Ok(acc)
-}
+type Client = AuthCodeSpotify;
 
-async fn write_playlist(client: &Client, id: &str, tracks: Vec<Track>) -> anyhow::Result<()> {
-    let mut tracks: VecDeque<_> = tracks
-        .into_iter()
-        .flat_map(|track| track.id.map(PlaylistItemType::<String, String>::Track))
-        .collect();
-    client
-        .playlists()
-        .replace_playlists_items(id, Vec::<PlaylistItemType<String, String>>::new())
-        .await?;
-    for i in 0.. {
-        if tracks.is_empty() {
-            break;
-        }
-        let batch = tracks.drain(0..100);
-        client
-            .playlists()
-            .add_to_playlist(id, batch, Some(i * 100))
-            .await?;
-    }
-    Ok(())
-}
-
-struct RefreshToken(String);
+struct RefreshToken(Token);
 
 impl RefreshToken {
     async fn into_client(self) -> Client {
-        let client = Client::new(credentials().clone());
-        client.set_refresh_token(Some(self.0)).await;
-        client
+        AuthCodeSpotify::from_token(self.0)
     }
 }
 
@@ -145,9 +106,13 @@ impl headers::Header for RefreshToken {
     {
         let cookies = headers::Cookie::decode(values)?;
         cookies
-            .get("refresh_token")
+            .get(COOKIE_NAME)
             .ok_or_else(headers::Error::invalid)
-            .map(|token| RefreshToken(token.to_string()))
+            .and_then(|s| {
+                serde_json::from_str(s)
+                    .map_err(|_| headers::Error::invalid())
+                    .map(|token| RefreshToken(token))
+            })
     }
 
     fn encode<E: Extend<http::HeaderValue>>(&self, _values: &mut E) {
@@ -155,30 +120,62 @@ impl headers::Header for RefreshToken {
     }
 }
 
-async fn perform_update(
-    TypedHeader(refresh_token): TypedHeader<RefreshToken>,
-) -> Result<Response<Empty<Bytes>>, String> {
-    let client = refresh_token.into_client().await;
-
-    let main_playlist = fetch_playlist(&client, "6CmOKM7D0nvMM1h1GQTl1L")
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let reduced_tracks = main_playlist
-        .iter()
-        .rev()
-        .take(100)
+async fn fetch_playlist(client: &Client, id: &PlaylistId) -> anyhow::Result<Vec<FullTrack>> {
+    let intermediate: Vec<ClientResult<PlaylistItem>> =
+        client.playlist_items(id, None, None).collect().await;
+    let result: ClientResult<Vec<PlaylistItem>> = intermediate.into_iter().collect();
+    Ok(result?
+        .into_iter()
         .filter_map(|item| {
-            if let Some(aspotify::PlaylistItemType::Track(track)) = &item.item {
+            if let Some(PlayableItem::Track(track)) = &item.track {
                 Some(track.clone())
             } else {
                 None
             }
         })
-        .collect();
-    write_playlist(&client, "02S7eexioL9T1xWOP53hlK", reduced_tracks)
-        .await
-        .map_err(|e| e.to_string())?;
+        .collect())
+}
+
+async fn write_playlist(
+    client: &Client,
+    id: &PlaylistId,
+    tracks: Vec<FullTrack>,
+) -> anyhow::Result<()> {
+    client.playlist_replace_items(id, vec![]).await?;
+    let mut tracks = VecDeque::from_iter(tracks.into_iter());
+    for i in 0.. {
+        if tracks.is_empty() {
+            break;
+        }
+        let batch: Vec<TrackId> = tracks.drain(0..100).map(|track| track.id).collect();
+        let batch: Vec<&dyn PlayableId> = batch.iter().map(|id| id as &dyn PlayableId).collect();
+        client
+            .playlist_add_items(id, batch.into_iter(), Some(i * 100))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn perform_update(
+    TypedHeader(refresh_token): TypedHeader<RefreshToken>,
+) -> Result<Response<Empty<Bytes>>, String> {
+    let client = refresh_token.into_client().await;
+
+    let main_playlist = fetch_playlist(
+        &client,
+        &PlaylistId::from_str("6CmOKM7D0nvMM1h1GQTl1L").unwrap(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let reduced_tracks = main_playlist.iter().rev().take(100).cloned().collect();
+    write_playlist(
+        &client,
+        &PlaylistId::from_str("02S7eexioL9T1xWOP53hlK").unwrap(),
+        reduced_tracks,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let response = Response::default();
     Ok(response)
