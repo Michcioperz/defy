@@ -1,0 +1,19 @@
+[package]
+name = "defy-rs"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.44"
+aspotify = "0.7.0"
+async-trait = "0.1.51"
+axum = { version = "0.2.8", features = ["headers"] }
+cookie = "0.15.1"
+headers = "0.3.5"
+http = "0.2.5"
+lazy_static = "1.4.0"
+pretty_env_logger = "0.4.0"
+serde = "1.0.130"
+tokio = { version = "1.12.0", features = ["macros", "rt-multi-thread"] }
+tower = "0.4.10"
+url = "2.2.2"
