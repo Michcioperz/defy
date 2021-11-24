@@ -5,7 +5,7 @@ use axum::{
     routing::get,
     AddExtensionLayer, Router,
 };
-use color_eyre::eyre::{eyre, Context};
+use color_eyre::eyre::Context;
 
 use rspotify::{
     clients::{BaseClient, OAuthClient},
@@ -104,8 +104,7 @@ async fn auth_callback(
         .write_token_cache()
         .await
         .expect("writing token cache failed");
-    txs
-        .lock()
+    txs.lock()
         .await
         .take()
         .expect("auth race lost")

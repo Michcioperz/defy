@@ -14,8 +14,8 @@ use rspotify::{
 use sled::Db;
 use tracing::{info, instrument};
 
-mod kickstart;
 mod data_input;
+mod kickstart;
 
 #[tokio::main]
 async fn main() -> Result<()> {
