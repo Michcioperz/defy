@@ -1,13 +1,23 @@
 [package]
-name = "defy-rs"
+name = "defy"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-anyhow = "1.0.44"
-axum = "0.2.8"
-http = "0.2.5"
-pretty_env_logger = "0.4.0"
+axum = "0.3.4"
+color-eyre = "0.5.11"
+futures-util = "0.3.18"
+itertools = "0.10.1"
 rspotify = { version = "0.11.2", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
 serde = "1.0.130"
-tokio = { version = "1.12.0", features = ["macros", "rt-multi-thread"] }
+serde_json = "1.0.71"
+sled = "0.34.7"
+tokio = { version = "1.14.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.29"
+tracing-error = "0.1.2"
+tracing-subscriber = { version = "0.2.25", features = ["env-filter"] }
+webbrowser = "0.5.5"
+
+[patch.crates-io]
+rspotify-http = { git = "https://github.com/Michcioperz/rspotify", branch = "defy-patched" }
+rspotify-model = { git = "https://github.com/Michcioperz/rspotify", branch = "defy-patched" }
