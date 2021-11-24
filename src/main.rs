@@ -4,6 +4,8 @@ use color_eyre::Result;
 use futures_util::StreamExt;
 use itertools::Itertools;
 use kickstart::Client;
+use linfa::prelude::*;
+use linfa_trees::DecisionTree;
 use rspotify::{
     clients::{BaseClient, OAuthClient},
     model::{
@@ -16,6 +18,47 @@ use tracing::{info, instrument};
 
 mod data_input;
 mod kickstart;
+mod learning;
+
+#[instrument(skip(client, db))]
+async fn perform_update(client: &Client, db: Db) -> Result<()> {
+    let main_playlist = fetch_playlist(
+        &client,
+        &PlaylistId::from_str("6CmOKM7D0nvMM1h1GQTl1L").unwrap(),
+    )
+    .await?;
+
+    let reduced_tracks: Vec<&dyn PlayableId> = main_playlist
+        .iter()
+        .rev()
+        .take(100)
+        .map(|track| &track.id as &dyn PlayableId)
+        .collect();
+    write_playlist(
+        &client,
+        &PlaylistId::from_str("02S7eexioL9T1xWOP53hlK").unwrap(),
+        reduced_tracks,
+    )
+    .await?;
+
+    let comfy_dataset = learning::feature_dataset_for_fitting(db.clone(), "comfy").await?;
+    let comfy_tree = DecisionTree::params().fit(&comfy_dataset)?;
+    let all_dataset = learning::feature_dataset_for_prediction(db).await?;
+    let predicted_comfy: Vec<TrackId> = all_dataset
+        .targets()
+        .iter()
+        .zip(comfy_tree.predict(all_dataset.records()).into_raw_vec())
+        .filter(|(_, prediction)| *prediction)
+        .map(|(id, _)| TrackId::from_str(id).unwrap())
+        .collect();
+    write_playlist(
+        &client,
+        &PlaylistId::from_str("4FV2Z1R15FBlQruwI6HO6z").unwrap(),
+        predicted_comfy.iter().map(|track| track as &dyn PlayableId),
+    )
+    .await?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,7 +90,7 @@ async fn main() -> Result<()> {
     info!("launching data input interface");
     data_input::web_interface(db.clone(), client.clone()).await?;
     info!("performing programmed actions");
-    perform_update(&client).await?;
+    perform_update(&client, db.clone()).await?;
 
     Ok(())
 }
@@ -98,42 +141,23 @@ async fn fetch_library_albums(client: &Client) -> Result<Vec<SavedAlbum>> {
     Ok(result?)
 }
 
-#[instrument(skip(client, tracks), fields(tracks.len = tracks.len()))]
-async fn write_playlist(client: &Client, id: &PlaylistId, tracks: Vec<FullTrack>) -> Result<()> {
+#[instrument(skip(client, tracks))]
+async fn write_playlist<'a>(
+    client: &Client,
+    id: &PlaylistId,
+    tracks: impl IntoIterator<Item = &'a dyn PlayableId> + Send + 'a,
+) -> Result<()> {
     client.playlist_replace_items(id, vec![]).await?;
     let mut tracks = VecDeque::from_iter(tracks.into_iter());
     for i in 0.. {
         if tracks.is_empty() {
             break;
         }
-        let batch: Vec<TrackId> = tracks.drain(0..100).map(|track| track.id).collect();
 
         client
-            .playlist_add_items(
-                id,
-                batch.iter().map(|id| id as &dyn PlayableId),
-                Some(i * 100),
-            )
+            .playlist_add_items(id, tracks.drain(0..(tracks.len().min(100))), Some(i * 100))
             .await?;
     }
-    Ok(())
-}
-
-#[instrument(skip(client))]
-async fn perform_update(client: &Client) -> Result<()> {
-    let main_playlist = fetch_playlist(
-        &client,
-        &PlaylistId::from_str("6CmOKM7D0nvMM1h1GQTl1L").unwrap(),
-    )
-    .await?;
-
-    let reduced_tracks = main_playlist.iter().rev().take(100).cloned().collect();
-    write_playlist(
-        &client,
-        &PlaylistId::from_str("02S7eexioL9T1xWOP53hlK").unwrap(),
-        reduced_tracks,
-    )
-    .await?;
     Ok(())
 }
 
