@@ -59,7 +59,10 @@ fn base_client() -> Client {
                 "user-library-read",
                 "playlist-read-private",
                 "playlist-modify-private",
-                "playlist-modify-public"
+                "playlist-modify-public",
+                "streaming",
+                "user-read-email",
+                "user-read-private"
             ),
             ..Default::default()
         },

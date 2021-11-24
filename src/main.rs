@@ -15,6 +15,7 @@ use sled::Db;
 use tracing::{info, instrument};
 
 mod kickstart;
+mod data_input;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,8 +38,14 @@ async fn main() -> Result<()> {
     let client = kickstart::kickstart().await?;
     info!("opening database");
     let db = sled::open("db").unwrap();
-    info!("populating database");
-    populate_database(&client, db.clone()).await?;
+    if std::env::var("SKIP_POPULATING").is_ok() {
+        info!("skipping database populating")
+    } else {
+        info!("populating database");
+        populate_database(&client, db.clone()).await?;
+    }
+    info!("launching data input interface");
+    data_input::web_interface(db.clone(), client.clone()).await?;
     info!("performing programmed actions");
     perform_update(&client).await?;
 
