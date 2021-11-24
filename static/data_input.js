@@ -1,4 +1,11 @@
 async function build() {
+    const shutdown_button = document.createElement("button");
+    shutdown_button.innerText = "finish data input";
+    shutdown_button.addEventListener("click", async () => {
+        await fetch(`/api/shutdown`, {method: "POST"});
+        window.close();
+    });
+    document.body.appendChild(shutdown_button);
     const body = document.createElement("main");
     document.body.appendChild(body);
     const features = await (await fetch("/api/features")).json();

@@ -54,7 +54,8 @@ pub(crate) async fn web_interface(db: Db, client: Client) -> color_eyre::Result<
                         )
                         .route("/", get(list_features)),
                 )
-                .route("/spotify_token", get(spotify_token)),
+                .route("/spotify_token", get(spotify_token))
+                .route("/shutdown", post(shutdown)),
         )
         .route("/", get(data_input_html))
         .nest(
@@ -148,6 +149,18 @@ async fn rate_feature_for_track(
 async fn spotify_token(Extension((_, client, _)): Extension<State>) -> Result<String> {
     let token = client.get_token().lock().await.unwrap().clone().unwrap();
     Ok(token.access_token)
+}
+
+#[instrument(skip(shutdown_mechanism))]
+async fn shutdown(Extension((_, _, shutdown_mechanism)): Extension<State>) -> Result<&'static str> {
+    shutdown_mechanism
+        .lock()
+        .await
+        .take()
+        .expect("shutdown race lost")
+        .send(())
+        .unwrap();
+    Ok("ok")
 }
 
 #[instrument]
